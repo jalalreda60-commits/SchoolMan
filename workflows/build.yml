@@ -1,0 +1,185 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:        # allows manual trigger from GitHub UI
+
+jobs:
+  build-windows:
+    runs-on: windows-latest   # GitHub's Windows Server machine (has internet)
+
+    steps:
+      # ── 1. Checkout your code ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python 3.11 ─────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"          # caches pip downloads between runs
+
+      # ── 3. Upgrade pip (GitHub has full internet) ──────────────────────────
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      # ── 4. Install all dependencies ────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install PySide6
+          python -m pip install SQLAlchemy
+          python -m pip install reportlab
+          python -m pip install Pillow
+          python -m pip install "qrcode[pil]"
+          python -m pip install openpyxl
+          python -m pip install pyinstaller
+
+      # ── 5. Verify imports work ─────────────────────────────────────────────
+      - name: Verify imports
+        run: |
+          python -c "import PySide6; print('PySide6 OK')"
+          python -c "import sqlalchemy; print('SQLAlchemy OK')"
+          python -c "import reportlab; print('ReportLab OK')"
+          python -c "import PIL; print('Pillow OK')"
+          python -c "import qrcode; print('qrcode OK')"
+          python -c "import openpyxl; print('openpyxl OK')"
+          python -c "import PyInstaller; print('PyInstaller OK')"
+
+      # ── 6. Initialize database ─────────────────────────────────────────────
+      - name: Initialize database
+        run: |
+          python -c "
+          import sys, os
+          sys.path.insert(0, '.')
+          from models.database import init_db, Session
+          init_db()
+          session = Session()
+          from models.database import User, Class
+          print('Users:', session.query(User).count())
+          print('Classes:', session.query(Class).count())
+          session.close()
+          print('Database initialized OK')
+          "
+
+      # ── 7. Build the EXE ───────────────────────────────────────────────────
+      - name: Build EXE with PyInstaller
+        run: |
+          python -m PyInstaller SchoolManager.spec --noconfirm --clean
+
+      # ── 8. Verify EXE was created ──────────────────────────────────────────
+      - name: Verify EXE exists
+        run: |
+          dir dist\
+          if exist dist\SchoolManager.exe (
+            echo EXE built successfully!
+          ) else (
+            echo ERROR: EXE not found!
+            exit /b 1
+          )
+        shell: cmd
+
+      # ── 9. Set up dist folder structure ───────────────────────────────────
+      - name: Set up dist folder
+        shell: cmd
+        run: |
+          if not exist dist\assets    mkdir dist\assets
+          if not exist dist\documents mkdir dist\documents
+          if not exist dist\receipts  mkdir dist\receipts
+          if not exist dist\backups   mkdir dist\backups
+          if not exist dist\reports   mkdir dist\reports
+          copy /Y assets\school_logo.ico dist\assets\
+          copy /Y assets\school_logo.png dist\assets\
+          if exist assets\school_logo.jpg copy /Y assets\school_logo.jpg dist\assets\
+
+      # ── 10. Copy pre-built database into dist ─────────────────────────────
+      - name: Copy database to dist
+        run: |
+          python -c "
+          import sys, os, shutil
+          sys.path.insert(0, '.')
+          # init fresh DB directly in dist/
+          import sqlalchemy
+          import models.database as db
+          db.DB_PATH = os.path.abspath('dist/school.db')
+          db.engine  = sqlalchemy.create_engine('sqlite:///' + db.DB_PATH, echo=False)
+          db.Session = sqlalchemy.orm.sessionmaker(bind=db.engine)
+          db.Base.metadata.create_all(db.engine)
+          db.init_db()
+          print('school.db created in dist/')
+          "
+
+      # ── 11. Create README for the dist folder ─────────────────────────────
+      - name: Create dist README
+        shell: cmd
+        run: |
+          echo Le Schema - School Management System > dist\README.txt
+          echo ====================================== >> dist\README.txt
+          echo. >> dist\README.txt
+          echo Double-click SchoolManager.exe to launch. >> dist\README.txt
+          echo. >> dist\README.txt
+          echo Default login: >> dist\README.txt
+          echo   Username: admin >> dist\README.txt
+          echo   Password: admin123 >> dist\README.txt
+          echo. >> dist\README.txt
+          echo Built with GitHub Actions on Windows. >> dist\README.txt
+
+      # ── 12. Upload the full dist as a downloadable artifact ───────────────
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeSchema-SchoolManager-Windows
+          path: dist\
+          retention-days: 30        # artifact stays available for 30 days
+
+      # ── 13. Create a GitHub Release (only on push to main) ────────────────
+      - name: Get current date
+        if: github.event_name == 'push'
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Zip dist for release
+        if: github.event_name == 'push'
+        shell: cmd
+        run: |
+          powershell Compress-Archive -Path dist\* -DestinationPath LeSchema-SchoolManager-Windows.zip
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Le Schéma v1.0 — Build ${{ github.run_number }} (${{ steps.date.outputs.date }})"
+          body: |
+            ## 🎓 Le Schéma — School Management System
+
+            ### ⬇️ Download
+            Download **LeSchema-SchoolManager-Windows.zip**, extract it, and double-click `SchoolManager.exe`.
+
+            ### 🔑 Default Login
+            | Field    | Value      |
+            |----------|------------|
+            | Username | `admin`    |
+            | Password | `admin123` |
+
+            ### ✅ Features
+            - Dashboard with live statistics
+            - Student management (15 classes PS→2BAC)
+            - Automatic PDF receipts with QR code
+            - Payment tracking (monthly, insurance, transport)
+            - Employee & salary management
+            - Expense tracking & financial reports
+            - Transport & timetable management
+            - PDF & Excel reports
+            - Auto backup system
+
+            > Built automatically by GitHub Actions on Windows Server.
+          files: LeSchema-SchoolManager-Windows.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
